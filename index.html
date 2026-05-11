@@ -1,0 +1,1288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>冒险岛 - MapleStory Adventure</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'Courier New', monospace;
+  }
+  #game-wrapper {
+    position: relative;
+    border: 3px solid #e6a817;
+    border-radius: 8px;
+    box-shadow: 0 0 30px rgba(230, 168, 23, 0.3);
+  }
+  canvas {
+    display: block;
+    border-radius: 5px;
+  }
+  #ui-overlay {
+    position: absolute;
+    top: 10px;
+    left: 0;
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    padding: 0 15px;
+    pointer-events: none;
+    color: white;
+    font-size: 14px;
+    text-shadow: 2px 2px 0 #000;
+  }
+</style>
+</head>
+<body>
+<div id="game-wrapper">
+  <canvas id="game"></canvas>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+canvas.width = 960;
+canvas.height = 540;
+
+// ─── Audio System ───
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+function playTone(freq, duration, type = 'square', vol = 0.06) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + duration);
+}
+function sfxHit() { playTone(150, 0.1, 'sawtooth', 0.08); playTone(80, 0.15, 'square', 0.06); }
+function sfxJump() { playTone(400, 0.08, 'square', 0.04); playTone(600, 0.08, 'square', 0.04); }
+function sfxCoin() { playTone(880, 0.06, 'square', 0.05); playTone(1100, 0.08, 'square', 0.05); }
+function sfxLevelUp() { playTone(523, 0.1, 'square', 0.07); playTone(659, 0.1, 'square', 0.07); playTone(784, 0.15, 'square', 0.07); }
+function sfxPotion() { playTone(300, 0.08, 'triangle', 0.05); playTone(500, 0.12, 'triangle', 0.06); }
+function sfxDeath() { playTone(200, 0.2, 'sawtooth', 0.08); playTone(100, 0.4, 'sawtooth', 0.07); }
+
+// ─── Input ───
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Space' || e.code === 'ArrowUp') e.preventDefault();
+  if (!audioCtx || audioCtx.state === 'suspended') audioCtx.resume();
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// ─── Camera ───
+const camera = { x: 0, y: 0 };
+
+// ─── World ───
+const WORLD_W = 6400;
+const GROUND_Y = 440;
+
+// ─── Particles ───
+const particles = [];
+function spawnParticles(x, y, count, color, spread = 3, life = 25) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * spread * 2,
+      vy: (Math.random() - 0.7) * spread * 3,
+      life, maxLife: life,
+      color,
+      size: Math.random() * 4 + 2
+    });
+  }
+}
+
+// ─── Damage Numbers ───
+const dmgNumbers = [];
+function spawnDmgNum(x, y, text, color = '#ff6600') {
+  dmgNumbers.push({ x, y, text, color, life: 40, vy: -3 });
+}
+
+// ─── Items ───
+const items = [];
+function spawnItem(x, y, type) {
+  items.push({ x, y, type, vy: -5, life: 400, collected: false });
+}
+
+// ─── Player ───
+const player = {
+  x: 120, y: GROUND_Y - 64,
+  w: 40, h: 64,
+  vx: 0, vy: 0,
+  speed: 5,
+  jumpForce: -13,
+  onGround: false,
+  facing: 1,
+  hp: 100, maxHp: 100,
+  mp: 50, maxMp: 50,
+  exp: 0, expToLevel: 50,
+  level: 1,
+  attackCooldown: 0,
+  attackTimer: 0,
+  invincible: 0,
+  animFrame: 0,
+  animTimer: 0,
+  state: 'idle',
+};
+
+// ─── Platforms ───
+const platforms = [
+  // Main ground segments (with gaps)
+  { x: 0, y: GROUND_Y, w: 800, h: 100 },
+  { x: 900, y: GROUND_Y, w: 600, h: 100 },
+  { x: 1600, y: GROUND_Y, w: 500, h: 100 },
+  { x: 2200, y: GROUND_Y, w: 700, h: 100 },
+  { x: 3000, y: GROUND_Y, w: 400, h: 100 },
+  { x: 3500, y: GROUND_Y, w: 800, h: 100 },
+  { x: 4400, y: GROUND_Y, w: 500, h: 100 },
+  { x: 5000, y: GROUND_Y, w: 1400, h: 100 },
+  // Floating platforms
+  { x: 500, y: 360, w: 120, h: 18 },
+  { x: 700, y: 310, w: 100, h: 18 },
+  { x: 1100, y: 350, w: 130, h: 18 },
+  { x: 1350, y: 280, w: 100, h: 18 },
+  { x: 1700, y: 330, w: 150, h: 18 },
+  { x: 1950, y: 370, w: 120, h: 18 },
+  { x: 2300, y: 300, w: 120, h: 18 },
+  { x: 2550, y: 360, w: 140, h: 18 },
+  { x: 2750, y: 260, w: 100, h: 18 },
+  { x: 3100, y: 340, w: 120, h: 18 },
+  { x: 3300, y: 280, w: 100, h: 18 },
+  { x: 3600, y: 350, w: 130, h: 18 },
+  { x: 3900, y: 300, w: 120, h: 18 },
+  { x: 4200, y: 350, w: 100, h: 18 },
+  { x: 4550, y: 310, w: 120, h: 18 },
+  { x: 4800, y: 340, w: 100, h: 18 },
+  { x: 5100, y: 280, w: 130, h: 18 },
+  { x: 5400, y: 330, w: 120, h: 18 },
+];
+
+// ─── Monsters ───
+const monsters = [];
+function spawnMonster(x, y, type) {
+  const types = {
+    slime: { w: 36, h: 30, hp: 2, dmg: 8, speed: 0.8, exp: 15, color: '#44cc44', name: '绿泡泡' },
+    mushroom: { w: 38, h: 40, hp: 4, dmg: 12, speed: 1.2, exp: 25, color: '#ff8844', name: '花蘑菇' },
+    pig: { w: 44, h: 32, hp: 6, dmg: 18, speed: 2, exp: 40, color: '#ff6699', name: '粉红猪' },
+    golem: { w: 50, h: 55, hp: 12, dmg: 25, speed: 0.6, exp: 80, color: '#887766', name: '石巨人' },
+    drake: { w: 52, h: 38, hp: 8, dmg: 20, speed: 1.8, exp: 55, color: '#cc4444', name: '小火龙' },
+  };
+  const info = types[type];
+  monsters.push({
+    x, y: y - info.h,
+    w: info.w, h: info.h,
+    vx: (Math.random() > 0.5 ? 1 : -1) * info.speed,
+    vy: 0,
+    hp: info.hp, maxHp: info.hp,
+    dmg: info.dmg,
+    speed: info.speed,
+    exp: info.exp,
+    color: info.color,
+    name: info.name,
+    type,
+    onGround: false,
+    animTimer: 0,
+    hitTimer: 0,
+    patrolLeft: x - 80, patrolRight: x + 80,
+  });
+}
+
+// Place monsters throughout the world
+function initMonsters() {
+  monsters.length = 0;
+  // Slimes
+  for (let i = 0; i < 8; i++) spawnMonster(300 + i * 150, GROUND_Y, 'slime');
+  for (let i = 0; i < 5; i++) spawnMonster(1000 + i * 130, GROUND_Y, 'slime');
+  // Mushrooms
+  for (let i = 0; i < 5; i++) spawnMonster(1700 + i * 160, GROUND_Y, 'mushroom');
+  for (let i = 0; i < 4; i++) spawnMonster(3100 + i * 150, GROUND_Y, 'mushroom');
+  // Pigs
+  for (let i = 0; i < 4; i++) spawnMonster(2300 + i * 200, GROUND_Y, 'pig');
+  for (let i = 0; i < 3; i++) spawnMonster(3550 + i * 180, GROUND_Y, 'pig');
+  // Drakes
+  for (let i = 0; i < 3; i++) spawnMonster(4400 + i * 200, GROUND_Y, 'drake');
+  // Golems
+  for (let i = 0; i < 3; i++) spawnMonster(5100 + i * 250, GROUND_Y, 'golem');
+  for (let i = 0; i < 2; i++) spawnMonster(5600 + i * 200, GROUND_Y, 'golem');
+}
+
+// ─── Background elements ───
+const bgTrees = [];
+const bgClouds = [];
+const bgMountains = [];
+function initBackground() {
+  bgTrees.length = 0;
+  bgClouds.length = 0;
+  bgMountains.length = 0;
+  for (let i = 0; i < 60; i++) {
+    bgTrees.push({ x: Math.random() * WORLD_W, h: 80 + Math.random() * 120 });
+  }
+  for (let i = 0; i < 30; i++) {
+    bgClouds.push({ x: Math.random() * WORLD_W, y: 30 + Math.random() * 180, w: 80 + Math.random() * 120, speed: 0.2 + Math.random() * 0.5 });
+  }
+  for (let i = 0; i < 20; i++) {
+    bgMountains.push({ x: i * 350 + Math.random() * 80, w: 200 + Math.random() * 150, h: 100 + Math.random() * 120 });
+  }
+}
+
+// ─── NPCs ───
+const npcs = [
+  { x: 80, y: GROUND_Y - 58, w: 30, h: 58, name: '村长', dialog: '欢迎来到冒险岛！消灭怪物，收集道具，变得更强吧！', color: '#ffaa55' },
+  { x: 2500, y: GROUND_Y - 58, w: 30, h: 58, name: '药师', dialog: '前面的怪物更强了，小心哦！按J键可以攻击。', color: '#55aaff' },
+  { x: 5000, y: GROUND_Y - 58, w: 30, h: 58, name: '勇士', dialog: '你已经很强了！打败石巨人证明你的实力吧！', color: '#ff5555' },
+];
+
+// ─── Game State ───
+let score = 0;
+let coins = 0;
+let gameState = 'title';
+let gameOverTimer = 0;
+let screenShake = 0;
+let bossDefeated = false;
+
+// ─── Reset game ───
+function resetGame() {
+  player.x = 120;
+  player.y = GROUND_Y - 64;
+  player.vx = 0;
+  player.vy = 0;
+  player.hp = player.maxHp;
+  player.mp = player.maxMp;
+  player.exp = 0;
+  player.expToLevel = 50;
+  player.level = 1;
+  player.attackCooldown = 0;
+  player.attackTimer = 0;
+  player.invincible = 0;
+  player.facing = 1;
+  player.state = 'idle';
+  score = 0;
+  coins = 0;
+  gameOverTimer = 0;
+  screenShake = 0;
+  bossDefeated = false;
+  particles.length = 0;
+  dmgNumbers.length = 0;
+  items.length = 0;
+  initMonsters();
+  initBackground();
+  camera.x = 0;
+  camera.y = 0;
+}
+
+// ─── Collision ───
+function rectCollide(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function getPlatformCollisions(entity) {
+  const result = [];
+  for (const p of platforms) {
+    if (rectCollide(entity, p)) {
+      result.push(p);
+    }
+  }
+  return result;
+}
+
+// ─── Update ───
+function update() {
+  if (gameState === 'title') return;
+  if (gameState === 'gameover') {
+    gameOverTimer--;
+    if (gameOverTimer <= 0 && (keys['KeyR'] || keys['Space'])) {
+      resetGame();
+      gameState = 'playing';
+    }
+    return;
+  }
+
+  if (screenShake > 0) screenShake--;
+
+  // ── Player movement ──
+  if (player.attackTimer > 0) {
+    player.attackTimer--;
+  } else {
+    player.state = 'idle';
+  }
+
+  if (player.attackCooldown > 0) player.attackCooldown--;
+  if (player.invincible > 0) player.invincible--;
+
+  let moveX = 0;
+  if (keys['ArrowLeft'] || keys['KeyA']) moveX = -1;
+  if (keys['ArrowRight'] || keys['KeyD']) moveX = 1;
+
+  if (player.attackTimer <= 0) {
+    player.vx = moveX * player.speed;
+    if (moveX !== 0) {
+      player.facing = moveX;
+      if (player.onGround) player.state = 'walk';
+    }
+  } else {
+    player.vx *= 0.8;
+    player.state = 'attack';
+  }
+
+  // Jump
+  if ((keys['ArrowUp'] || keys['KeyW'] || keys['Space']) && player.onGround && player.attackTimer <= 0) {
+    player.vy = player.jumpForce;
+    player.onGround = false;
+    player.state = 'jump';
+    sfxJump();
+  }
+
+  // Attack
+  if ((keys['KeyJ'] || keys['KeyK']) && player.attackCooldown <= 0 && player.attackTimer <= 0) {
+    player.attackTimer = 15;
+    player.attackCooldown = 25;
+    player.state = 'attack';
+    // Check attack hit
+    const atkBox = {
+      x: player.facing > 0 ? player.x + player.w : player.x - 50,
+      y: player.y + 10,
+      w: 50,
+      h: player.h - 20,
+    };
+    for (const m of monsters) {
+      if (m.hp <= 0) continue;
+      if (rectCollide(atkBox, m)) {
+        m.hp--;
+        m.hitTimer = 10;
+        m.vx = player.facing * 5;
+        m.vy = -6;
+        spawnParticles(m.x + m.w / 2, m.y + m.h / 2, 8, '#ffffff', 4, 20);
+        const crit = Math.random() < 0.1;
+        const dmg = crit ? 3 : 1 + Math.floor(player.level / 3);
+        spawnDmgNum(m.x + m.w / 2, m.y, crit ? `${dmg}!暴击` : `${dmg}`, crit ? '#ff0000' : '#ffaa00');
+        sfxHit();
+        if (m.hp <= 0) {
+          player.exp += m.exp;
+          score += m.exp * 10;
+          spawnParticles(m.x + m.w / 2, m.y + m.h / 2, 15, m.color, 5, 30);
+          spawnDmgNum(m.x + m.w / 2, m.y - 20, `+${m.exp}XP`, '#ffff00');
+          // Drop item
+          const roll = Math.random();
+          if (roll < 0.3) spawnItem(m.x + m.w / 2, m.y, 'coin');
+          else if (roll < 0.45) spawnItem(m.x + m.w / 2, m.y, 'potion_hp');
+          else if (roll < 0.5) spawnItem(m.x + m.w / 2, m.y, 'potion_mp');
+          break;
+        }
+      }
+    }
+  }
+
+  // Gravity
+  player.vy += 0.7;
+  if (player.vy > 15) player.vy = 15;
+
+  // Move Y
+  player.y += player.vy;
+  player.onGround = false;
+  for (const p of getPlatformCollisions(player)) {
+    if (player.vy > 0) {
+      player.y = p.y - player.h;
+      player.vy = 0;
+      player.onGround = true;
+    } else if (player.vy < 0) {
+      player.y = p.y + p.h;
+      player.vy = 0;
+    }
+  }
+
+  // Move X
+  player.x += player.vx;
+  for (const p of getPlatformCollisions(player)) {
+    if (player.vx > 0) {
+      player.x = p.x - player.w;
+    } else if (player.vx < 0) {
+      player.x = p.x + p.w;
+    }
+    player.vx = 0;
+  }
+
+  // World bounds
+  if (player.x < 0) player.x = 0;
+  if (player.x > WORLD_W - player.w) player.x = WORLD_W - player.w;
+  if (player.y > canvas.height + 100) {
+    // Fell off
+    player.hp = 0;
+  }
+
+  // Animation
+  player.animTimer++;
+  if (player.animTimer > 8) { player.animTimer = 0; player.animFrame = (player.animFrame + 1) % 4; }
+
+  // Level up
+  if (player.exp >= player.expToLevel) {
+    player.exp -= player.expToLevel;
+    player.level++;
+    player.expToLevel = Math.floor(player.expToLevel * 1.5);
+    player.maxHp += 20;
+    player.hp = Math.min(player.hp + 30, player.maxHp);
+    player.maxMp += 10;
+    player.mp = Math.min(player.mp + 15, player.maxMp);
+    player.speed += 0.15;
+    player.jumpForce -= 0.3;
+    sfxLevelUp();
+    spawnParticles(player.x + player.w / 2, player.y + player.h / 2, 25, '#ffff44', 6, 35);
+    spawnDmgNum(player.x + player.w / 2, player.y, 'LEVEL UP!', '#ffdd00');
+  }
+
+  // ── Monsters ──
+  for (const m of monsters) {
+    if (m.hp <= 0) continue;
+    if (m.hitTimer > 0) { m.hitTimer--; continue; }
+
+    // Patrol AI
+    m.animTimer++;
+    if (m.x <= m.patrolLeft) { m.vx = Math.abs(m.speed); }
+    else if (m.x >= m.patrolRight) { m.vx = -Math.abs(m.speed); }
+
+    // Gravity
+    m.vy += 0.6;
+    if (m.vy > 12) m.vy = 12;
+
+    m.y += m.vy;
+    m.onGround = false;
+    for (const p of platforms) {
+      if (rectCollide(m, p)) {
+        if (m.vy > 0) { m.y = p.y - m.h; m.vy = 0; m.onGround = true; }
+      }
+    }
+
+    m.x += m.vx;
+    for (const p of platforms) {
+      if (rectCollide(m, p)) {
+        if (m.vx > 0) { m.x = p.x - m.w; m.vx = -Math.abs(m.speed); }
+        else if (m.vx < 0) { m.x = p.x + p.w; m.vx = Math.abs(m.speed); }
+      }
+    }
+
+    // Player collision damage
+    if (player.invincible <= 0 && rectCollide(player, m)) {
+      player.hp -= m.dmg;
+      player.invincible = 45;
+      player.vx = (player.x > m.x ? 1 : -1) * 6;
+      player.vy = -6;
+      screenShake = 10;
+      spawnParticles(player.x + player.w / 2, player.y + player.h / 2, 10, '#ff4444', 4, 20);
+      spawnDmgNum(player.x + player.w / 2, player.y, `-${m.dmg}`, '#ff0000');
+      sfxHit();
+    }
+  }
+
+  // ── Items ──
+  for (const item of items) {
+    if (item.collected) continue;
+    item.vy += 0.5;
+    item.y += item.vy;
+    for (const p of platforms) {
+      if (rectCollide(item, p) && item.vy > 0) {
+        item.y = p.y - 12;
+        item.vy = 0;
+      }
+    }
+    item.life--;
+    if (item.life <= 0) { item.collected = true; continue; }
+    // Blink when about to expire
+    if (item.life < 80 && Math.floor(item.life / 8) % 2 === 0) continue;
+
+    if (rectCollide(player, item)) {
+      item.collected = true;
+      if (item.type === 'coin') {
+        coins++;
+        score += 100;
+        sfxCoin();
+        spawnDmgNum(item.x, item.y, '+100', '#ffdd00');
+        spawnParticles(item.x, item.y, 6, '#ffdd00', 2, 15);
+      } else if (item.type === 'potion_hp') {
+        player.hp = Math.min(player.hp + 25, player.maxHp);
+        sfxPotion();
+        spawnDmgNum(item.x, item.y, '+25HP', '#44ff44');
+      } else if (item.type === 'potion_mp') {
+        player.mp = Math.min(player.mp + 15, player.maxMp);
+        sfxPotion();
+        spawnDmgNum(item.x, item.y, '+15MP', '#4444ff');
+      }
+    }
+  }
+
+  // ── Remove dead monsters ──
+  for (let i = monsters.length - 1; i >= 0; i--) {
+    if (monsters[i].hp <= 0 && monsters[i].hitTimer <= 0) {
+      monsters.splice(i, 1);
+    }
+  }
+  // Clean items
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (items[i].collected || items[i].life <= 0) items.splice(i, 1);
+  }
+
+  // ── Particles ──
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.1;
+    p.life--;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+
+  // ── Damage numbers ──
+  for (let i = dmgNumbers.length - 1; i >= 0; i--) {
+    const d = dmgNumbers[i];
+    d.y += d.vy;
+    d.life--;
+    if (d.life <= 0) dmgNumbers.splice(i, 1);
+  }
+
+  // ── Camera ──
+  const targetCamX = player.x - canvas.width / 2 + player.w / 2;
+  camera.x += (targetCamX - camera.x) * 0.1;
+  camera.x = Math.max(0, Math.min(WORLD_W - canvas.width, camera.x));
+  camera.y = Math.max(0, player.y - canvas.height / 2);
+
+  // ── Player death ──
+  if (player.hp <= 0) {
+    gameState = 'gameover';
+    gameOverTimer = 60;
+    sfxDeath();
+    spawnParticles(player.x + player.w / 2, player.y + player.h / 2, 30, '#ff4444', 6, 40);
+  }
+
+  // Respawn monsters occasionally
+  if (monsters.length < 15 && Math.random() < 0.008) {
+    const types = ['slime', 'slime', 'mushroom', 'mushroom', 'pig', 'drake', 'golem'];
+    const type = types[Math.floor(Math.random() * types.length)];
+    const spawnX = player.x + canvas.width / 2 + (Math.random() > 0.5 ? 1 : -1) * (400 + Math.random() * 300);
+    spawnMonster(Math.max(50, Math.min(WORLD_W - 50, spawnX)), GROUND_Y, type);
+  }
+}
+
+// ─── Drawing helpers ───
+function drawRect(x, y, w, h, color) {
+  ctx.fillStyle = color;
+  ctx.fillRect(x, y, w, h);
+}
+
+function drawCircle(x, y, r, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// ─── Draw Player ───
+function drawPlayer() {
+  if (player.invincible > 0 && Math.floor(player.invincible / 4) % 2 === 0) return;
+  const { x, y, w, h, facing, state, animFrame } = player;
+  const cx = x - camera.x;
+  const cy = y - camera.y;
+  const f = facing;
+
+  ctx.save();
+  ctx.translate(cx + w / 2, cy);
+
+  // Body
+  const bodyBob = state === 'walk' ? Math.sin(animFrame * Math.PI / 2) * 2 : 0;
+
+  // Legs
+  const legSpread = state === 'walk' ? (animFrame % 2 === 0 ? 5 : -5) : 0;
+  drawRect(-10 + legSpread, h / 2 - 5, 14, h / 2 - 10, '#3355aa');
+  drawRect(-4 - legSpread, h / 2 - 5, 14, h / 2 - 10, '#3355aa');
+  // Feet
+  drawRect(-12 + legSpread, h - 12, 18, 8, '#664422');
+  drawRect(-6 - legSpread, h - 12, 18, 8, '#664422');
+
+  // Torso
+  drawRect(-12, 10, 24, h / 2 + bodyBob, '#4488ff');
+  // Belt
+  drawRect(-12, 28, 24, 6, '#885522');
+
+  // Arms
+  if (state === 'attack') {
+    // Attack pose - arm extended
+    const armLen = 30;
+    drawRect(8, 14, armLen, 8, '#ffcc88');
+    // Sword
+    ctx.fillStyle = '#cccccc';
+    ctx.fillRect(8 + armLen, 10, 4, 24);
+    ctx.fillStyle = '#ffdd44';
+    ctx.fillRect(6 + armLen, 28, 8, 4);
+  } else {
+    drawRect(-18, 14, 10, 20, '#ffcc88');
+    drawRect(8, 14, 10, 20, '#ffcc88');
+  }
+
+  // Head
+  drawRect(-11, -12, 22, 24, '#ffcc88');
+  // Hair
+  ctx.fillStyle = '#553300';
+  ctx.fillRect(-13, -18, 26, 12);
+  ctx.fillRect(-13, -18, 6, 16);
+  ctx.fillRect(7, -18, 6, 16);
+  // Eyes
+  drawCircle(f * 4, -2, 3, '#000000');
+  drawCircle(f * 4 + 1, -3, 1, '#ffffff');
+  // Mouth
+  ctx.fillStyle = '#cc6644';
+  ctx.fillRect(f * 3, 6, 6, 2);
+
+  // Hat (cute adventurer cap)
+  ctx.fillStyle = '#ff4444';
+  ctx.fillRect(-14, -22, 28, 8);
+  ctx.fillRect(-8, -28, 16, 8);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(-6, -26, 12, 4);
+
+  ctx.restore();
+}
+
+// ─── Draw Monster ───
+function drawMonster(m) {
+  if (m.hp <= 0 && m.hitTimer <= 0) return;
+  const cx = m.x - camera.x;
+  const cy = m.y - camera.y;
+  const bob = m.onGround ? Math.sin(m.animTimer * 0.15) * 3 : 0;
+
+  ctx.save();
+  ctx.translate(cx, cy + bob);
+
+  if (m.hitTimer > 0 && Math.floor(m.hitTimer / 2) % 2 === 0) {
+    ctx.globalAlpha = 0.5;
+  }
+
+  switch (m.type) {
+    case 'slime':
+      drawSlime(m);
+      break;
+    case 'mushroom':
+      drawMushroom(m);
+      break;
+    case 'pig':
+      drawPig(m);
+      break;
+    case 'golem':
+      drawGolem(m);
+      break;
+    case 'drake':
+      drawDrake(m);
+      break;
+  }
+
+  ctx.restore();
+
+  // HP bar (only if damaged)
+  if (m.hp < m.maxHp) {
+    const barW = m.w;
+    const barH = 5;
+    const barX = cx;
+    const barY = cy - 10;
+    drawRect(barX, barY, barW, barH, '#333333');
+    drawRect(barX, barY, barW * (m.hp / m.maxHp), barH, '#ff4444');
+  }
+}
+
+function drawSlime(m) {
+  const { w, h } = m;
+  // Body (bouncy slime)
+  ctx.fillStyle = '#44cc44';
+  ctx.beginPath();
+  ctx.ellipse(0, h * 0.4, w / 2, h / 2, 0, Math.PI, 0);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(0, h * 0.4, w / 2, h * 0.35, 0, 0, Math.PI);
+  ctx.fill();
+  // Eyes
+  drawCircle(-7, h * 0.2, 5, '#ffffff');
+  drawCircle(7, h * 0.2, 5, '#ffffff');
+  drawCircle(-7, h * 0.2, 3, '#000000');
+  drawCircle(7, h * 0.2, 3, '#000000');
+  // Shine
+  drawCircle(-10, h * 0.15, 2, '#ffffff');
+}
+
+function drawMushroom(m) {
+  const { w, h } = m;
+  // Stem
+  drawRect(-8, h * 0.3, 16, h * 0.7, '#ffeecc');
+  // Cap
+  ctx.fillStyle = '#ff8844';
+  ctx.beginPath();
+  ctx.ellipse(0, h * 0.3, w / 2, h * 0.45, 0, Math.PI, 0);
+  ctx.fill();
+  ctx.fillRect(-w / 2, h * 0.3 - 2, w, h * 0.05);
+  // Spots
+  drawCircle(-8, h * 0.1, 4, '#ffcc88');
+  drawCircle(9, h * 0.08, 3, '#ffcc88');
+  drawCircle(0, h * 0.02, 5, '#ffcc88');
+  // Eyes
+  drawCircle(-6, h * 0.35, 3, '#000000');
+  drawCircle(6, h * 0.35, 3, '#000000');
+}
+
+function drawPig(m) {
+  const { w, h } = m;
+  // Body
+  ctx.fillStyle = '#ff6699';
+  ctx.beginPath();
+  ctx.ellipse(0, h * 0.5, w / 2, h * 0.4, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Head
+  drawCircle(0, h * 0.15, w * 0.3, '#ff6699');
+  // Ears
+  ctx.fillStyle = '#ff4477';
+  ctx.beginPath();
+  ctx.ellipse(-8, h * 0.05, 6, 10, -0.3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(8, h * 0.05, 6, 10, 0.3, 0, Math.PI * 2);
+  ctx.fill();
+  // Eyes
+  drawCircle(-5, h * 0.12, 3, '#000000');
+  drawCircle(5, h * 0.12, 3, '#000000');
+  // Snout
+  drawCircle(0, h * 0.22, 6, '#ff88aa');
+  drawCircle(-2, h * 0.22, 1.5, '#cc4466');
+  drawCircle(2, h * 0.22, 1.5, '#cc4466');
+  // Feet
+  drawRect(-12, h - 8, 10, 8, '#cc4466');
+  drawRect(2, h - 8, 10, 8, '#cc4466');
+}
+
+function drawGolem(m) {
+  const { w, h } = m;
+  // Body
+  drawRect(-18, h * 0.2, 36, h * 0.6, '#887766');
+  // Texture lines
+  drawRect(-14, h * 0.3, 28, 3, '#665544');
+  drawRect(-14, h * 0.5, 28, 3, '#665544');
+  // Arms
+  drawRect(-26, h * 0.25, 10, h * 0.25, '#776655');
+  drawRect(16, h * 0.25, 10, h * 0.25, '#776655');
+  // Head
+  drawRect(-14, -8, 28, h * 0.35, '#998877');
+  // Eyes (glowing)
+  ctx.fillStyle = '#ff4444';
+  ctx.shadowColor = '#ff4444';
+  ctx.shadowBlur = 8;
+  ctx.fillRect(-10, 2, 6, 6);
+  ctx.fillRect(4, 2, 6, 6);
+  ctx.shadowBlur = 0;
+  // Legs
+  drawRect(-12, h * 0.8, 10, h * 0.2, '#665544');
+  drawRect(2, h * 0.8, 10, h * 0.2, '#665544');
+}
+
+function drawDrake(m) {
+  const { w, h } = m;
+  // Body
+  ctx.fillStyle = '#cc4444';
+  ctx.beginPath();
+  ctx.ellipse(0, h * 0.5, w * 0.35, h * 0.38, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Head
+  drawCircle(0, h * 0.12, w * 0.2, '#cc4444');
+  // Snout
+  ctx.fillStyle = '#aa3333';
+  ctx.beginPath();
+  ctx.ellipse(5, h * 0.15, 10, 6, 0.2, 0, Math.PI * 2);
+  ctx.fill();
+  // Eyes
+  drawCircle(-4, h * 0.08, 3, '#ffffff');
+  drawCircle(-4, h * 0.08, 2, '#000000');
+  // Wings
+  ctx.fillStyle = '#dd5555';
+  ctx.beginPath();
+  ctx.moveTo(-8, h * 0.2);
+  ctx.lineTo(-25, h * 0.05);
+  ctx.lineTo(-18, h * 0.4);
+  ctx.closePath();
+  ctx.fill();
+  // Tail
+  ctx.fillStyle = '#cc4444';
+  ctx.beginPath();
+  ctx.moveTo(-8, h * 0.5);
+  ctx.lineTo(-20, h * 0.65);
+  ctx.lineTo(-12, h * 0.7);
+  ctx.closePath();
+  ctx.fill();
+  // Legs
+  drawRect(-10, h * 0.75, 8, h * 0.25, '#aa3333');
+  drawRect(2, h * 0.75, 8, h * 0.25, '#aa3333');
+}
+
+// ─── Draw Background ───
+function drawBackground() {
+  // Sky gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  grad.addColorStop(0, '#87ceeb');
+  grad.addColorStop(0.6, '#b8e6ff');
+  grad.addColorStop(1, '#90c890');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Clouds
+  const cloudParallax = 0.3;
+  for (const c of bgClouds) {
+    const cx = c.x - camera.x * cloudParallax;
+    c.x += c.speed * 0.2;
+    if (c.x > WORLD_W + 200) c.x = -200;
+    if (cx < -200 || cx > canvas.width + 200) continue;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+    drawCircle(cx, c.y, c.w * 0.3, 'rgba(255,255,255,0.7)');
+    drawCircle(cx - c.w * 0.2, c.y + 10, c.w * 0.25, 'rgba(255,255,255,0.65)');
+    drawCircle(cx + c.w * 0.2, c.y + 8, c.w * 0.28, 'rgba(255,255,255,0.65)');
+  }
+
+  // Mountains
+  const mtParallax = 0.5;
+  for (const m of bgMountains) {
+    const mx = m.x - camera.x * mtParallax;
+    if (mx < -m.w || mx > canvas.width + m.w) continue;
+    ctx.fillStyle = '#7aa87a';
+    ctx.beginPath();
+    ctx.moveTo(mx - m.w / 2, GROUND_Y - camera.y * 0.3);
+    ctx.lineTo(mx, GROUND_Y - m.h - camera.y * 0.3);
+    ctx.lineTo(mx + m.w / 2, GROUND_Y - camera.y * 0.3);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#8ab88a';
+    ctx.beginPath();
+    ctx.moveTo(mx - m.w / 4, GROUND_Y - camera.y * 0.3);
+    ctx.lineTo(mx, GROUND_Y - m.h - 30 - camera.y * 0.3);
+    ctx.lineTo(mx + m.w / 4, GROUND_Y - camera.y * 0.3);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Trees
+  const treeParallax = 0.7;
+  for (const t of bgTrees) {
+    const tx = t.x - camera.x * treeParallax;
+    if (tx < -60 || tx > canvas.width + 60) continue;
+    // Trunk
+    drawRect(tx - 6, GROUND_Y - t.h - camera.y * 0.1, 12, t.h, '#8B6914');
+    // Leaves (layered circles)
+    drawCircle(tx, GROUND_Y - t.h - 10 - camera.y * 0.1, t.h * 0.4, '#3a8c3a');
+    drawCircle(tx - 12, GROUND_Y - t.h - 5 - camera.y * 0.1, t.h * 0.3, '#2d7a2d');
+    drawCircle(tx + 12, GROUND_Y - t.h - 5 - camera.y * 0.1, t.h * 0.3, '#359035');
+  }
+
+  // Distant ground
+  drawRect(0, GROUND_Y - camera.y * 0.3, canvas.width, canvas.height - GROUND_Y + camera.y * 0.3, '#5a8030');
+}
+
+// ─── Draw Platforms ───
+function drawPlatforms() {
+  for (const p of platforms) {
+    const px = p.x - camera.x;
+    const py = p.y - camera.y;
+    if (px < -p.w || px > canvas.width + p.w) continue;
+
+    if (p.h > 50) {
+      // Ground segment
+      drawRect(px, py, p.w, p.h, '#8B5E3C');
+      drawRect(px, py, p.w, 12, '#4CAF50');
+      drawRect(px, py, p.w, 4, '#6FBF40');
+      // Grass tufts
+      for (let gx = px; gx < px + p.w; gx += 25) {
+        ctx.fillStyle = '#3a8c3a';
+        ctx.fillRect(gx + Math.sin(gx * 0.3) * 5, py - 6, 3, 10);
+        ctx.fillRect(gx + 8, py - 4, 3, 8);
+      }
+    } else {
+      // Floating platform
+      drawRect(px, py, p.w, p.h, '#A0724A');
+      drawRect(px, py, p.w, 4, '#6FBF40');
+      drawRect(px, py, p.w, 7, '#C08A5A');
+    }
+  }
+}
+
+// ─── Draw NPC ───
+function drawNPC(npc) {
+  const nx = npc.x - camera.x;
+  const ny = npc.y - camera.y;
+  if (nx < -50 || nx > canvas.width + 50) return;
+
+  // Body
+  drawRect(nx - 8, ny + 20, 16, 24, npc.color);
+  // Head
+  drawCircle(nx, ny + 8, 12, '#ffcc88');
+  drawCircle(nx, ny + 8, 4, '#000000');
+  // Hat
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(nx - 10, ny - 2, 20, 6);
+  // Name tag
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(nx - 20, ny - 14, 40, 14);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(npc.name, nx, ny - 3);
+  ctx.textAlign = 'start';
+}
+
+// ─── Draw Items ───
+function drawItems() {
+  for (const item of items) {
+    if (item.collected) continue;
+    if (item.life < 80 && Math.floor(item.life / 8) % 2 === 0) continue;
+    const ix = item.x - camera.x;
+    const iy = item.y - camera.y;
+
+    const bob = Math.sin(Date.now() * 0.005 + item.x) * 3;
+
+    if (item.type === 'coin') {
+      drawCircle(ix, iy + bob, 8, '#ffdd00');
+      drawCircle(ix, iy + bob, 5, '#ffee55');
+      ctx.fillStyle = '#ffaa00';
+      ctx.font = 'bold 10px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('$', ix, iy + bob + 4);
+      ctx.textAlign = 'start';
+    } else if (item.type === 'potion_hp') {
+      drawRect(ix - 6, iy - 8 + bob, 12, 16, '#ff4444');
+      drawRect(ix - 2, iy - 6 + bob, 4, 6, '#ffffff');
+      drawRect(ix - 4, iy + 2 + bob, 8, 4, '#cc3333');
+      // Cork
+      drawRect(ix - 3, iy - 12 + bob, 6, 5, '#886644');
+    } else if (item.type === 'potion_mp') {
+      drawRect(ix - 6, iy - 8 + bob, 12, 16, '#4444ff');
+      drawRect(ix - 2, iy - 6 + bob, 4, 6, '#ffffff');
+      drawRect(ix - 4, iy + 2 + bob, 8, 4, '#3333cc');
+      drawRect(ix - 3, iy - 12 + bob, 6, 5, '#886644');
+    }
+  }
+}
+
+// ─── Draw HUD ───
+function drawHUD() {
+  const padding = 15;
+
+  // Background panel
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.fillRect(padding - 5, padding - 5, 260, 100);
+  ctx.strokeStyle = '#e6a817';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(padding - 5, padding - 5, 260, 100);
+
+  // Level & Name
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText(`Lv.${player.level}  冒险家`, padding + 5, padding + 16);
+
+  // HP bar
+  ctx.fillStyle = '#666666';
+  ctx.fillRect(padding + 5, padding + 24, 200, 16);
+  const hpRatio = player.hp / player.maxHp;
+  const hpColor = hpRatio > 0.5 ? '#44cc44' : hpRatio > 0.25 ? '#ffaa00' : '#ff3333';
+  ctx.fillStyle = hpColor;
+  ctx.fillRect(padding + 5, padding + 24, 200 * hpRatio, 16);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText(`HP ${player.hp}/${player.maxHp}`, padding + 10, padding + 37);
+
+  // MP bar
+  ctx.fillStyle = '#666666';
+  ctx.fillRect(padding + 5, padding + 44, 200, 12);
+  ctx.fillStyle = '#4488ff';
+  ctx.fillRect(padding + 5, padding + 44, 200 * (player.mp / player.maxMp), 12);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(`MP ${player.mp}/${player.maxMp}`, padding + 10, padding + 54);
+
+  // EXP bar
+  ctx.fillStyle = '#666666';
+  ctx.fillRect(padding + 5, padding + 60, 200, 8);
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillRect(padding + 5, padding + 60, 200 * (player.exp / player.expToLevel), 8);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '9px monospace';
+  ctx.fillText(`EXP ${player.exp}/${player.expToLevel}`, padding + 8, padding + 67);
+
+  // Score & Coins (top right)
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.fillRect(canvas.width - 200, padding - 5, 185, 45);
+  ctx.strokeStyle = '#e6a817';
+  ctx.strokeRect(canvas.width - 200, padding - 5, 185, 45);
+
+  ctx.fillStyle = '#ffdd00';
+  ctx.font = 'bold 13px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(`金币: ${coins}`, canvas.width - padding, padding + 16);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(`分数: ${score}`, canvas.width - padding, padding + 34);
+  ctx.textAlign = 'start';
+
+  // Controls hint (bottom)
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, canvas.height - 25, canvas.width, 25);
+  ctx.fillStyle = '#cccccc';
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('移动: ← → 或 A D  |  跳跃: ↑ 或 W 或 空格  |  攻击: J 或 K', canvas.width / 2, canvas.height - 8);
+  ctx.textAlign = 'start';
+}
+
+// ─── Draw Title Screen ───
+function drawTitle() {
+  // Animated background
+  const t = Date.now() * 0.001;
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Floating particles
+  for (let i = 0; i < 30; i++) {
+    const px = (Math.sin(t * 0.7 + i * 2.1) * 0.5 + 0.5) * canvas.width;
+    const py = (Math.cos(t * 0.5 + i * 1.3) * 0.5 + 0.5) * canvas.height;
+    drawCircle(px, py, 2 + Math.abs(Math.sin(t + i)) * 3, `rgba(255, 200, 50, ${0.3 + Math.sin(t + i) * 0.3})`);
+  }
+
+  // Title
+  ctx.fillStyle = '#ffaa00';
+  ctx.font = 'bold 56px "KaiTi", "STKaiti", "楷体", serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('冒 险 岛', canvas.width / 2, 160);
+  ctx.textAlign = 'start';
+
+  // Subtitle
+  ctx.fillStyle = '#ffcc66';
+  ctx.font = '20px "KaiTi", "STKaiti", "楷体", serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('MapleStory Adventure', canvas.width / 2, 200);
+  ctx.textAlign = 'start';
+
+  // Decorative line
+  const lineY = 225;
+  ctx.strokeStyle = '#e6a817';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(canvas.width / 2 - 150, lineY);
+  ctx.lineTo(canvas.width / 2 + 150, lineY);
+  ctx.stroke();
+  drawCircle(canvas.width / 2, lineY, 5, '#e6a817');
+
+  // Start button
+  const btnX = canvas.width / 2 - 100;
+  const btnY = 280;
+  const pulse = Math.sin(t * 2) * 3;
+  ctx.fillStyle = '#e6a817';
+  ctx.fillRect(btnX - pulse / 2, btnY - pulse / 2, 200 + pulse, 50 + pulse);
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(btnX + 3, btnY + 3, 194, 44);
+  ctx.fillStyle = '#ffcc44';
+  ctx.font = 'bold 22px "KaiTi", "STKaiti", "楷体", serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('点击开始游戏', canvas.width / 2, btnY + 34);
+  ctx.textAlign = 'start';
+
+  // Controls info
+  ctx.fillStyle = '#aaaaaa';
+  ctx.font = '14px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('键盘控制: ← → 移动  ↑ 跳跃  J 攻击', canvas.width / 2, 380);
+  ctx.fillText('击败怪物获取经验，收集金币和药水', canvas.width / 2, 405);
+  ctx.textAlign = 'start';
+
+  // Draw a cute slime
+  const slimeX = canvas.width / 2;
+  const slimeY = 470;
+  const slimeBob = Math.sin(t * 3) * 8;
+  ctx.fillStyle = '#44cc44';
+  ctx.beginPath();
+  ctx.ellipse(slimeX, slimeY + slimeBob, 25, 20, 0, Math.PI, 0);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(slimeX, slimeY + slimeBob, 25, 12, 0, 0, Math.PI);
+  ctx.fill();
+  drawCircle(slimeX - 10, slimeY - 8 + slimeBob, 6, '#ffffff');
+  drawCircle(slimeX + 10, slimeY - 8 + slimeBob, 6, '#ffffff');
+  drawCircle(slimeX - 10, slimeY - 8 + slimeBob, 3, '#000000');
+  drawCircle(slimeX + 10, slimeY - 8 + slimeBob, 3, '#000000');
+}
+
+// ─── Draw Game Over ───
+function drawGameOver() {
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = '#ff4444';
+  ctx.font = 'bold 48px "KaiTi", "STKaiti", "楷体", serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('你倒下了...', canvas.width / 2, 180);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '18px monospace';
+  ctx.fillText(`等级: ${player.level}    分数: ${score}    金币: ${coins}`, canvas.width / 2, 240);
+
+  const t = Date.now() * 0.001;
+  const pulse = Math.sin(t * 2) * 2;
+  ctx.fillStyle = '#e6a817';
+  ctx.fillRect(canvas.width / 2 - 100 - pulse / 2, 300 - pulse / 2, 200 + pulse, 45 + pulse);
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(canvas.width / 2 - 97, 303, 194, 39);
+  ctx.fillStyle = '#ffcc44';
+  ctx.font = 'bold 18px "KaiTi", "STKaiti", "楷体", serif';
+  ctx.fillText(gameOverTimer > 0 ? `按R重新开始 (${Math.ceil(gameOverTimer / 60)}s)` : '按R重新开始', canvas.width / 2, 330);
+  ctx.textAlign = 'start';
+}
+
+// ─── NPC Dialog ───
+let activeDialog = null;
+function checkNPCDialog() {
+  for (const npc of npcs) {
+    const dist = Math.abs(player.x + player.w / 2 - (npc.x + npc.w / 2));
+    if (dist < 55) {
+      return npc;
+    }
+  }
+  return null;
+}
+
+function drawDialog(npc) {
+  const nx = npc.x - camera.x;
+  const ny = npc.y - camera.y;
+  const dx = Math.min(canvas.width - 310, Math.max(10, nx - 120));
+  const dy = ny - 70;
+
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+  ctx.fillRect(dx, dy, 300, 55);
+  ctx.strokeStyle = '#e6a817';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(dx, dy, 300, 55);
+
+  ctx.fillStyle = '#ffaa00';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillText(npc.name, dx + 8, dy + 16);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '11px monospace';
+  const words = npc.dialog.split('');
+  let line = '';
+  let lineY = dy + 34;
+  for (const ch of words) {
+    if (ctx.measureText(line + ch).width > 280) {
+      ctx.fillText(line, dx + 8, lineY);
+      line = ch;
+      lineY += 16;
+    } else {
+      line += ch;
+    }
+  }
+  if (line) ctx.fillText(line, dx + 8, lineY);
+}
+
+// ─── Main Render ───
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (gameState === 'title') {
+    drawTitle();
+    return;
+  }
+
+  // Screen shake offset
+  let shakeX = 0, shakeY = 0;
+  if (screenShake > 0) {
+    shakeX = (Math.random() - 0.5) * screenShake;
+    shakeY = (Math.random() - 0.5) * screenShake;
+  }
+
+  ctx.save();
+  ctx.translate(shakeX, shakeY);
+
+  drawBackground();
+  drawPlatforms();
+
+  // NPCs
+  for (const npc of npcs) drawNPC(npc);
+
+  // Items
+  drawItems();
+
+  // Monsters
+  for (const m of monsters) drawMonster(m);
+
+  // Player
+  drawPlayer();
+
+  // Particles
+  for (const p of particles) {
+    const alpha = p.life / p.maxLife;
+    ctx.fillStyle = p.color.replace(')', `, ${alpha})`).replace('rgb', 'rgba');
+    if (p.color.startsWith('#')) {
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = p.color;
+    }
+    ctx.fillRect(p.x - camera.x - p.size / 2, p.y - camera.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+
+  // Damage numbers
+  for (const d of dmgNumbers) {
+    const alpha = d.life / 40;
+    ctx.fillStyle = d.color;
+    ctx.globalAlpha = alpha;
+    ctx.font = 'bold 12px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(d.text, d.x - camera.x, d.y - camera.y);
+    ctx.textAlign = 'start';
+  }
+  ctx.globalAlpha = 1;
+
+  // NPC Dialog
+  const nearbyNPC = checkNPCDialog();
+  if (nearbyNPC) drawDialog(nearbyNPC);
+
+  ctx.restore();
+
+  // HUD (no shake)
+  drawHUD();
+
+  // Game Over overlay
+  if (gameState === 'gameover') drawGameOver();
+}
+
+// ─── Game Loop ───
+function gameLoop() {
+  update();
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+// ─── Click to start ───
+canvas.addEventListener('click', (e) => {
+  if (gameState === 'title') {
+    if (!audioCtx || audioCtx.state === 'suspended') audioCtx.resume();
+    resetGame();
+    gameState = 'playing';
+  }
+});
+
+// ─── Init & Start ───
+resetGame();
+gameState = 'title';
+gameLoop();
+
+console.log('🗡️  欢迎来到冒险岛！');
+console.log('  移动: ← → 或 A D');
+console.log('  跳跃: ↑ 或 W 或 空格');
+console.log('  攻击: J 或 K');
+console.log('  点击屏幕开始游戏');
+</script>
+</body>
+</html>
