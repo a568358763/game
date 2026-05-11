@@ -202,20 +202,23 @@ function spawnMonster(x, y, type) {
 // Place monsters throughout the world
 function initMonsters() {
   monsters.length = 0;
-  // Slimes
-  for (let i = 0; i < 8; i++) spawnMonster(300 + i * 150, GROUND_Y, 'slime');
-  for (let i = 0; i < 5; i++) spawnMonster(1000 + i * 130, GROUND_Y, 'slime');
+  // Slimes - scattered
+  spawnMonster(350, GROUND_Y, 'slime');
+  spawnMonster(700, GROUND_Y, 'slime');
+  spawnMonster(1050, GROUND_Y, 'slime');
+  spawnMonster(1400, GROUND_Y, 'slime');
   // Mushrooms
-  for (let i = 0; i < 5; i++) spawnMonster(1700 + i * 160, GROUND_Y, 'mushroom');
-  for (let i = 0; i < 4; i++) spawnMonster(3100 + i * 150, GROUND_Y, 'mushroom');
+  spawnMonster(1900, GROUND_Y, 'mushroom');
+  spawnMonster(2300, GROUND_Y, 'mushroom');
+  spawnMonster(3200, GROUND_Y, 'mushroom');
   // Pigs
-  for (let i = 0; i < 4; i++) spawnMonster(2300 + i * 200, GROUND_Y, 'pig');
-  for (let i = 0; i < 3; i++) spawnMonster(3550 + i * 180, GROUND_Y, 'pig');
+  spawnMonster(2600, GROUND_Y, 'pig');
+  spawnMonster(3700, GROUND_Y, 'pig');
   // Drakes
-  for (let i = 0; i < 3; i++) spawnMonster(4400 + i * 200, GROUND_Y, 'drake');
+  spawnMonster(4500, GROUND_Y, 'drake');
   // Golems
-  for (let i = 0; i < 3; i++) spawnMonster(5100 + i * 250, GROUND_Y, 'golem');
-  for (let i = 0; i < 2; i++) spawnMonster(5600 + i * 200, GROUND_Y, 'golem');
+  spawnMonster(5300, GROUND_Y, 'golem');
+  spawnMonster(5800, GROUND_Y, 'golem');
 }
 
 // ─── Background elements ───
@@ -385,8 +388,8 @@ function update() {
   }
 
   // Gravity
-  player.vy += 0.35;
-  if (player.vy > 10) player.vy = 10;
+  player.vy += 0.22;
+  if (player.vy > 8) player.vy = 8;
 
   // Move Y
   player.y += player.vy;
@@ -564,7 +567,7 @@ function update() {
   }
 
   // Respawn monsters occasionally
-  if (monsters.length < 15 && Math.random() < 0.008) {
+  if (monsters.length < 5 && Math.random() < 0.003) {
     const types = ['slime', 'slime', 'mushroom', 'mushroom', 'pig', 'drake', 'golem'];
     const type = types[Math.floor(Math.random() * types.length)];
     const spawnX = player.x + canvas.width / 2 + (Math.random() > 0.5 ? 1 : -1) * (400 + Math.random() * 300);
