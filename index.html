@@ -121,8 +121,8 @@ const player = {
   x: 120, y: GROUND_Y - 64,
   w: 40, h: 64,
   vx: 0, vy: 0,
-  speed: 5,
-  jumpForce: -13,
+  speed: 3.2,
+  jumpForce: -16,
   onGround: false,
   facing: 1,
   hp: 100, maxHp: 100,
@@ -385,8 +385,8 @@ function update() {
   }
 
   // Gravity
-  player.vy += 0.7;
-  if (player.vy > 15) player.vy = 15;
+  player.vy += 0.55;
+  if (player.vy > 13) player.vy = 13;
 
   // Move Y
   player.y += player.vy;
